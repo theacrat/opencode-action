@@ -293,6 +293,11 @@ opencode_configure_run() {
   # shellcheck source=scripts/opencode-action-lib.sh
   source "${script_dir}/opencode-action-lib.sh"
 
+  if [[ "${USE_GITHUB_TOKEN:-false}" == "true" && -n "${GITHUB_TOKEN:-}" ]]; then
+    git config --global --add credential.https://github.com.helper \
+      '!f() { test "$1" = get && printf "protocol=https\nhost=github.com\nusername=x-access-token\npassword=%s\n" "${GITHUB_TOKEN}"; }; f'
+  fi
+
   opencode_validate_variant \
     "${MODEL:-}" "${VARIANT:-}" "${ACTION_PATH:-}/.opencode/opencode.jsonc" || return 1
 
