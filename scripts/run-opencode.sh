@@ -293,9 +293,13 @@ opencode_configure_run() {
   # shellcheck source=scripts/opencode-action-lib.sh
   source "${script_dir}/opencode-action-lib.sh"
 
+  opencode_apply_streaming_option
+
   if [[ "${USE_GITHUB_TOKEN:-false}" == "true" && -n "${GITHUB_TOKEN:-}" ]]; then
     git config --global --add credential.https://github.com.helper \
       '!f() { test "$1" = get && printf "protocol=https\nhost=github.com\nusername=x-access-token\npassword=%s\n" "${GITHUB_TOKEN}"; }; f'
+    git config --global user.name "opencode-agent[bot]"
+    git config --global user.email "opencode-agent[bot]@users.noreply.github.com"
   fi
 
   opencode_validate_variant \
