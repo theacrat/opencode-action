@@ -83,8 +83,6 @@ Both reusable workflows expose the action configuration plus a runner input:
 | `opencode-version`    | `latest`                                                            | OpenCode version to install.                                  |
 | `use-bundled-toolkit` | `true`                                                              | Use the bundled OpenCode toolkit.                             |
 | `timeout-minutes`     | `60`                                                                | Maximum OpenCode runtime in minutes.                          |
-| `max-attempts`        | `3`                                                                 | Retry attempts on transient provider/network errors.         |
-| `retry-delay-seconds` | `10`                                                                | Initial retry delay in seconds (doubles per attempt).        |
 | `runs-on`             | `ubuntu-latest`                                                     | Runner label for the called job.                              |
 
 GitHub.com's `$/path` self repository syntax resolves to the repository and commit of the workflow where it appears, including when that workflow is called from another repository. These workflows use `$/.` because the action is defined at the repository root. GitHub Enterprise Server does not support this syntax.

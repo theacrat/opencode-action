@@ -54,19 +54,6 @@ inputs:
     required: false
     description: Maximum minutes to let 'opencode github run' execute before it is killed (uses 'timeout'/'gtimeout' when available; otherwise runs without an enforced timeout).
     default: '60'
-  max-attempts:
-    required: false
-    description: >-
-      Maximum attempts for 'opencode github run' when it fails with a transient
-      provider or network error (timeouts, HTTP 429/5xx, upstream/endpoint
-      unavailability, dropped connections). Permanent failures (the enforced
-      timeout, HTTP 402/insufficient credits, invalid variant) are never
-      retried. Set to '1' to disable retrying.
-    default: '3'
-  retry-delay-seconds:
-    required: false
-    description: Initial delay before the first retry, in seconds. Doubles after each failed attempt, capped at 120s.
-    default: '10'
 outputs:
   opencode-version:
     description: OpenCode version resolved for this run.
@@ -149,8 +136,6 @@ runs:
         VARIANT: ${{ inputs.variant }}
         OIDC_BASE_URL: ${{ inputs.oidc-base-url }}
         TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
-        MAX_ATTEMPTS: ${{ inputs.max-attempts }}
-        RETRY_DELAY_SECONDS: ${{ inputs.retry-delay-seconds }}
         OPENCODE_VERSION: ${{ steps.version.outputs.opencode-version }}
         ACTION_PATH: ${{ github.action_path }}
         USE_BUNDLED_TOOLKIT: ${{ inputs.use-bundled-toolkit }}

@@ -99,8 +99,6 @@ The provider account must have sufficient credits or quota. For providers not bu
 | `opencode-version`    | `latest`                  | OpenCode version to install. `/review-pr` requires 1.2.14+; the bundled Sakura provider's `chunkTimeout` needs 1.2.25+ (older pins fall back to the request `timeout`). |
 | `use-bundled-toolkit` | `true`                    | Use the bundled agents, commands, skills, and configuration.                                                                                                            |
 | `timeout-minutes`     | `60`                      | Stop OpenCode after this many minutes.                                                                                                                                  |
-| `max-attempts`        | `3`                       | Retry `opencode github run` on transient provider/network errors (timeouts, HTTP 429/5xx, upstream unavailability). Permanent errors (timeout, HTTP 402, invalid variant) are never retried. Set `1` to disable. |
-| `retry-delay-seconds` | `10`                      | Initial delay before the first retry; doubles each attempt, capped at 120s.                                                                                             |
 | `oidc-base-url`       | `https://api.opencode.ai` | OIDC exchange URL for a custom GitHub App installation.                                                                                                                 |
 
 When `use-github-token: true`, keep `GITHUB_TOKEN` in `env` and grant only the permissions needed for the task.

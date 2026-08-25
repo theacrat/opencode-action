@@ -62,16 +62,6 @@ on:
         type: number
         description: Maximum minutes to let OpenCode run
         default: 60
-      max-attempts:
-        required: false
-        type: number
-        description: Max attempts for OpenCode on transient provider/network errors
-        default: 3
-      retry-delay-seconds:
-        required: false
-        type: number
-        description: Initial retry delay in seconds (doubles per attempt, capped at 120)
-        default: 10
       runs-on:
         required: false
         type: string
@@ -181,5 +171,3 @@ jobs:
           streaming: ${{ inputs.streaming }}
           use-bundled-toolkit: ${{ inputs.model == '' || inputs.use-bundled-toolkit }}
           timeout-minutes: ${{ inputs.timeout-minutes || 60 }}
-          max-attempts: ${{ inputs.max-attempts || 3 }}
-          retry-delay-seconds: ${{ inputs.retry-delay-seconds || 10 }}
