@@ -335,8 +335,81 @@ opencode_configure_run() {
   fi
 }
 
+# Retry a failed resumable run only for transient failures. The action's own
+# timeout (124) would just re-hang, and billing/quota (402) will not recover in
+# seconds, so those fail fast instead of burning the backoff budget.
+_opencode_resume_worth_retry() {
+  local status="${1}" output_file="${2}"
+  [[ "${status}" -eq 124 ]] && return 1
+  if grep -Eiq \
+    'Insufficient credits|HTTP[^[:digit:]]*402|status(Code)?[^[:digit:]]*402|"code"[^[:digit:]]*402' \
+    "${output_file}"; then
+    return 1
+  fi
+  return 0
+}
+
+# EXPERIMENTAL (resume-on-crash): drive the review through 'opencode run' so a
+# crash can be continued in the SAME job -- 'opencode github run' has no resume
+# path. On a transient failure, continue the session (not restart it) up to
+# three times with a 30s/30s/60s backoff, then fail. Because it is same-job,
+# both the session and the helper review-state stay on the runner, so nothing
+# is trusted across runs and review isolation is preserved.
+_opencode_run_resumable() {
+  local output_file opencode_status timeout_minutes attempt delay
+  local -a run_args agent_args resume_delays=(30 30 60)
+  timeout_minutes="${TIMEOUT_MINUTES:?TIMEOUT_MINUTES is required}"
+
+  opencode_configure_run
+  opencode_select_timeout_command "${timeout_minutes}"
+  output_file="$(mktemp)"
+  trap 'rm -f "${output_file}"' EXIT
+
+  agent_args=()
+  [[ -n "${OPENCODE_RESOLVED_AGENT:-}" ]] && agent_args=(--agent "${OPENCODE_RESOLVED_AGENT}")
+
+  # Initial run creates the session; retries continue that same session.
+  run_args=(run "${agent_args[@]}" "${PROMPT:-}")
+  attempt=0
+  while :; do
+    : > "${output_file}"
+    set +e
+    "${OPENCODE_TIMEOUT_COMMAND[@]}" opencode "${run_args[@]}" 2>&1 | tee "${output_file}"
+    opencode_status="${PIPESTATUS[0]}"
+    set -e
+
+    if [[ "${opencode_status}" -eq 0 ]]; then
+      rm -f "${output_file}"
+      trap - EXIT
+      return 0
+    fi
+
+    if ((attempt >= ${#resume_delays[@]})) \
+      || ! _opencode_resume_worth_retry "${opencode_status}" "${output_file}"; then
+      opencode_report_failure \
+        "${opencode_status}" "${output_file}" "${timeout_minutes}" \
+        "${MODEL:-unknown}" "${OPENCODE_VERSION:-unknown}"
+      rm -f "${output_file}"
+      trap - EXIT
+      return "${opencode_status}"
+    fi
+
+    delay="${resume_delays[attempt]}"
+    attempt=$((attempt + 1))
+    echo "::warning::OpenCode run failed (exit ${opencode_status}); continuing the session in ${delay}s (attempt ${attempt} of ${#resume_delays[@]})." >&2
+    sleep "${delay}"
+    run_args=(run --continue "${agent_args[@]}" "Continue the review from where it stopped and finish it.")
+  done
+}
+
 _opencode_run_main() {
   local output_file opencode_status timeout_minutes
+
+  if [[ "${RESUME_ON_CRASH:-false}" == "true" ]]; then
+    _opencode_run_resumable
+    return
+  fi
+
   timeout_minutes="${TIMEOUT_MINUTES:?TIMEOUT_MINUTES is required}"
 
   opencode_configure_run

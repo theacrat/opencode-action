@@ -782,3 +782,118 @@ EOF
   [[ "$(cat "${prompt_file}")" == *"Inspect securely: security"* ]]
   jq -e '.default_agent == "plan"' "${config_file}"
 }
+
+# opencode stub for resume-on-crash tests: logs every invocation and returns a
+# per-call exit status from OC_RUN_STATUSES (space-separated, clamped to last).
+# OC_RUN_OUTPUT is echoed by `run` so failure classification can be exercised.
+# Ships an instant `sleep` that records its arguments so backoff is assertable.
+_write_resume_opencode_stub() {
+  local dir="${1}"
+  mkdir -p "${dir}"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "%s\n" "$*" >>"${OC_LOG}"' \
+    'if [[ "${1:-}" == "run" ]]; then' \
+    '  [ -n "${OC_RUN_OUTPUT:-}" ] && printf "%s\n" "${OC_RUN_OUTPUT}"' \
+    '  n=0; [ -s "${OC_COUNT:-}" ] && n="$(cat "${OC_COUNT}")"' \
+    '  read -r -a st <<< "${OC_RUN_STATUSES:-0}"' \
+    '  idx="${n}"; [ "${idx}" -ge "${#st[@]}" ] && idx=$(( ${#st[@]} - 1 ))' \
+    '  [ -n "${OC_COUNT:-}" ] && printf "%s" "$(( n + 1 ))" >"${OC_COUNT}"' \
+    '  exit "${st[$idx]}"' \
+    'fi' \
+    'exit 0' > "${dir}/opencode"
+  chmod +x "${dir}/opencode"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'printf "%s\n" "$*" >>"${OC_SLEEP_LOG:-/dev/null}"' \
+    'exit 0' > "${dir}/sleep"
+  chmod +x "${dir}/sleep"
+}
+
+@test "resume-on-crash drives 'opencode run' and does not retry on success" {
+  fake_bin="${BATS_TEST_TMPDIR}/resume-ok"
+  _write_resume_opencode_stub "${fake_bin}"
+  oc_log="${BATS_TEST_TMPDIR}/log-ok"
+  oc_count="${BATS_TEST_TMPDIR}/cnt-ok"
+  oc_sleep="${BATS_TEST_TMPDIR}/slp-ok"
+
+  run env \
+    PATH="${fake_bin}:${PATH}" HOME="${fake_home}" ACTION_PATH="${fake_action}" \
+    GITHUB_WORKSPACE="${fake_workspace}" PROMPT="explicit prompt" AGENT="build" \
+    MENTIONS="/oc" MODEL="demo/model" REVIEW_ONLY="false" USE_BUNDLED_TOOLKIT="false" \
+    TIMEOUT_MINUTES="5" RESUME_ON_CRASH="true" \
+    OC_LOG="${oc_log}" OC_COUNT="${oc_count}" OC_SLEEP_LOG="${oc_sleep}" OC_RUN_STATUSES="0" \
+    "${run_script}"
+
+  [ "${status}" -eq 0 ]
+  grep -q "^run --agent build explicit prompt" "${oc_log}"
+  run grep -q "github run" "${oc_log}"
+  [ "${status}" -ne 0 ]
+  run grep -q -- "--continue" "${oc_log}"
+  [ "${status}" -ne 0 ]
+  [ ! -s "${oc_sleep}" ]
+}
+
+@test "resume-on-crash continues the session three times with 30/30/60 backoff then fails" {
+  fake_bin="${BATS_TEST_TMPDIR}/resume-fail"
+  _write_resume_opencode_stub "${fake_bin}"
+  oc_log="${BATS_TEST_TMPDIR}/log-fail"
+  oc_count="${BATS_TEST_TMPDIR}/cnt-fail"
+  oc_sleep="${BATS_TEST_TMPDIR}/slp-fail"
+
+  run env \
+    PATH="${fake_bin}:${PATH}" HOME="${fake_home}" ACTION_PATH="${fake_action}" \
+    GITHUB_WORKSPACE="${fake_workspace}" PROMPT="explicit prompt" AGENT="build" \
+    MENTIONS="/oc" MODEL="demo/model" REVIEW_ONLY="false" USE_BUNDLED_TOOLKIT="false" \
+    TIMEOUT_MINUTES="5" RESUME_ON_CRASH="true" \
+    OC_LOG="${oc_log}" OC_COUNT="${oc_count}" OC_SLEEP_LOG="${oc_sleep}" OC_RUN_STATUSES="1 1 1 1" \
+    "${run_script}"
+
+  [ "${status}" -ne 0 ]
+  [ "$(grep -c "^run --agent build explicit prompt" "${oc_log}")" -eq 1 ]
+  [ "$(grep -c "^run --continue" "${oc_log}")" -eq 3 ]
+  [ "$(cat "${oc_sleep}")" = "$(printf '30\n30\n60')" ]
+}
+
+@test "resume-on-crash succeeds after continuing a transient failure" {
+  fake_bin="${BATS_TEST_TMPDIR}/resume-recover"
+  _write_resume_opencode_stub "${fake_bin}"
+  oc_log="${BATS_TEST_TMPDIR}/log-recover"
+  oc_count="${BATS_TEST_TMPDIR}/cnt-recover"
+  oc_sleep="${BATS_TEST_TMPDIR}/slp-recover"
+
+  run env \
+    PATH="${fake_bin}:${PATH}" HOME="${fake_home}" ACTION_PATH="${fake_action}" \
+    GITHUB_WORKSPACE="${fake_workspace}" PROMPT="explicit prompt" AGENT="build" \
+    MENTIONS="/oc" MODEL="demo/model" REVIEW_ONLY="false" USE_BUNDLED_TOOLKIT="false" \
+    TIMEOUT_MINUTES="5" RESUME_ON_CRASH="true" \
+    OC_LOG="${oc_log}" OC_COUNT="${oc_count}" OC_SLEEP_LOG="${oc_sleep}" OC_RUN_STATUSES="1 0" \
+    "${run_script}"
+
+  [ "${status}" -eq 0 ]
+  [ "$(grep -c "^run --continue" "${oc_log}")" -eq 1 ]
+  [ "$(cat "${oc_sleep}")" = "30" ]
+}
+
+@test "resume-on-crash does not retry a billing failure" {
+  fake_bin="${BATS_TEST_TMPDIR}/resume-billing"
+  _write_resume_opencode_stub "${fake_bin}"
+  oc_log="${BATS_TEST_TMPDIR}/log-billing"
+  oc_count="${BATS_TEST_TMPDIR}/cnt-billing"
+  oc_sleep="${BATS_TEST_TMPDIR}/slp-billing"
+
+  run env \
+    PATH="${fake_bin}:${PATH}" HOME="${fake_home}" ACTION_PATH="${fake_action}" \
+    GITHUB_WORKSPACE="${fake_workspace}" PROMPT="explicit prompt" AGENT="build" \
+    MENTIONS="/oc" MODEL="demo/model" REVIEW_ONLY="false" USE_BUNDLED_TOOLKIT="false" \
+    TIMEOUT_MINUTES="5" RESUME_ON_CRASH="true" \
+    OC_LOG="${oc_log}" OC_COUNT="${oc_count}" OC_SLEEP_LOG="${oc_sleep}" \
+    OC_RUN_STATUSES="1" OC_RUN_OUTPUT="AI_APICallError: Insufficient credits (statusCode: 402)" \
+    "${run_script}"
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"billing or quota"* ]]
+  [ ! -s "${oc_sleep}" ]
+  run grep -q -- "--continue" "${oc_log}"
+  [ "${status}" -ne 0 ]
+}

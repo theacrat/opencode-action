@@ -57,6 +57,11 @@ on:
         type: number
         description: Maximum minutes to let OpenCode run
         default: 60
+      resume-on-crash:
+        required: false
+        type: boolean
+        description: EXPERIMENTAL. Continue a crashed opencode session in the same job (retry 3x with 30s/30s/60s backoff) instead of failing.
+        default: false
       runs-on:
         required: false
         type: string
@@ -156,3 +161,4 @@ jobs:
           opencode-version: ${{ inputs.opencode-version || 'latest' }}
           use-bundled-toolkit: ${{ inputs.model == '' || inputs.use-bundled-toolkit }}
           timeout-minutes: ${{ inputs.timeout-minutes || 60 }}
+          resume-on-crash: ${{ inputs.resume-on-crash || false }}

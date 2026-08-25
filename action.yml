@@ -50,6 +50,16 @@ inputs:
     required: false
     description: Maximum minutes to let 'opencode github run' execute before it is killed (uses 'timeout'/'gtimeout' when available; otherwise runs without an enforced timeout).
     default: '60'
+  resume-on-crash:
+    required: false
+    description: >-
+      EXPERIMENTAL. When true, drive the run through 'opencode run' (instead of
+      'opencode github run') so a transient crash is continued in the same job:
+      the session is resumed (not restarted) up to three times with a
+      30s/30s/60s backoff before failing. Same-job only -- no session state is
+      persisted across runs, so review isolation is preserved. Opt-in and off
+      by default.
+    default: 'false'
 outputs:
   opencode-version:
     description: OpenCode version resolved for this run.
@@ -135,5 +145,6 @@ runs:
         ACTION_PATH: ${{ github.action_path }}
         USE_BUNDLED_TOOLKIT: ${{ inputs.use-bundled-toolkit }}
         REVIEW_ONLY: ${{ steps.review_mode.outputs.enabled }}
+        RESUME_ON_CRASH: ${{ inputs.resume-on-crash }}
       run: >
         "${ACTION_PATH}/scripts/run-opencode.sh"
