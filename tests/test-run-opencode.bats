@@ -376,7 +376,7 @@ EOF
             .[];
             .name == "pr-review"
             and .location == $location
-            and (.content | contains("# Strictly Read-Only PR Review"))
+            and (.content | contains("Two-axis review"))
           )
           and all(.[]; .name != "untrusted-review")
         '\'' <<<"$skills"
@@ -781,4 +781,143 @@ EOF
   [ "$(cat "${invocation_file}")" = "opencode github run" ]
   [[ "$(cat "${prompt_file}")" == *"Inspect securely: security"* ]]
   jq -e '.default_agent == "plan"' "${config_file}"
+}
+
+@test "retry classification retries transient provider errors but not timeouts or billing" {
+  output_file="${BATS_TEST_TMPDIR}/retry-classify"
+
+  for msg in \
+    'APIError: Error from provider (Console Go): Upstream request failed: Endpoint is unavailable.' \
+    'AI_APICallError: statusCode: 503' \
+    'AI_APICallError: statusCode: 429' \
+    'Error: fetch failed' \
+    'TimeoutError: SSE read timed out'; do
+    printf '%s\n' "${msg}" > "${output_file}"
+    run bash -euo pipefail -c 'source "$1"; opencode_failure_is_retryable 1 "$2"' \
+      _ "${run_script}" "${output_file}"
+    [ "${status}" -eq 0 ] || {
+      echo "expected retryable: ${msg}"
+      return 1
+    }
+  done
+
+  # The enforced wall-clock timeout is never retried, whatever the log says.
+  printf '%s\n' 'AI_APICallError: statusCode: 503' > "${output_file}"
+  run bash -euo pipefail -c 'source "$1"; opencode_failure_is_retryable 124 "$2"' \
+    _ "${run_script}" "${output_file}"
+  [ "${status}" -ne 0 ]
+
+  # Billing/quota and unrelated deterministic errors are not retried.
+  for msg in \
+    'AI_APICallError: Insufficient credits (statusCode: 402)' \
+    'TypeError: cannot read property x of undefined'; do
+    printf '%s\n' "${msg}" > "${output_file}"
+    run bash -euo pipefail -c 'source "$1"; opencode_failure_is_retryable 1 "$2"' \
+      _ "${run_script}" "${output_file}"
+    [ "${status}" -ne 0 ] || {
+      echo "expected non-retryable: ${msg}"
+      return 1
+    }
+  done
+}
+
+_write_counting_opencode_stub() {
+  local dir="${1}"
+  mkdir -p "${dir}"
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'n=0; [ -f "${COUNT_FILE}" ] && n="$(cat "${COUNT_FILE}")"' \
+    'n=$((n + 1)); printf "%s" "${n}" >"${COUNT_FILE}"' \
+    'if [ "${n}" -le "${FAIL_UNTIL:-0}" ]; then printf "%s\n" "${FAIL_MESSAGE}"; exit "${FAIL_STATUS:-1}"; fi' \
+    'printf "ok\n"' > "${dir}/opencode"
+  chmod +x "${dir}/opencode"
+}
+
+@test "run retries a transient failure and then succeeds" {
+  fake_bin="${BATS_TEST_TMPDIR}/retry-bin"
+  count_file="${BATS_TEST_TMPDIR}/retry-count"
+  _write_counting_opencode_stub "${fake_bin}"
+
+  run env \
+    PATH="${fake_bin}:${PATH}" \
+    HOME="${fake_home}" \
+    ACTION_PATH="${fake_action}" \
+    GITHUB_WORKSPACE="${fake_workspace}" \
+    PROMPT="explicit prompt" \
+    AGENT="build" \
+    MENTIONS="/oc" \
+    MODEL="demo/model" \
+    REVIEW_ONLY="false" \
+    USE_BUNDLED_TOOLKIT="false" \
+    TIMEOUT_MINUTES="5" \
+    MAX_ATTEMPTS="3" \
+    RETRY_DELAY_SECONDS="0" \
+    COUNT_FILE="${count_file}" \
+    FAIL_UNTIL="1" \
+    FAIL_MESSAGE="APIError: Endpoint is unavailable" \
+    "${run_script}"
+
+  [ "${status}" -eq 0 ]
+  [ "$(cat "${count_file}")" = "2" ]
+  [[ "${output}" == *"attempt 1 of 3 failed with a transient error"* ]]
+}
+
+@test "run stops retrying after the last attempt and reports the failure" {
+  fake_bin="${BATS_TEST_TMPDIR}/exhaust-bin"
+  count_file="${BATS_TEST_TMPDIR}/exhaust-count"
+  _write_counting_opencode_stub "${fake_bin}"
+
+  run env \
+    PATH="${fake_bin}:${PATH}" \
+    HOME="${fake_home}" \
+    ACTION_PATH="${fake_action}" \
+    GITHUB_WORKSPACE="${fake_workspace}" \
+    PROMPT="explicit prompt" \
+    AGENT="build" \
+    MENTIONS="/oc" \
+    MODEL="demo/model" \
+    REVIEW_ONLY="false" \
+    USE_BUNDLED_TOOLKIT="false" \
+    TIMEOUT_MINUTES="5" \
+    MAX_ATTEMPTS="2" \
+    RETRY_DELAY_SECONDS="0" \
+    COUNT_FILE="${count_file}" \
+    FAIL_UNTIL="99" \
+    FAIL_MESSAGE="AI_APICallError: Endpoint is unavailable" \
+    "${run_script}"
+
+  [ "${status}" -ne 0 ]
+  [ "$(cat "${count_file}")" = "2" ]
+  [[ "${output}" == *"attempt 1 of 2 failed with a transient error"* ]]
+  [[ "${output}" == *"model provider API error"* ]]
+}
+
+@test "run does not retry a non-retryable failure" {
+  fake_bin="${BATS_TEST_TMPDIR}/noretry-bin"
+  count_file="${BATS_TEST_TMPDIR}/noretry-count"
+  _write_counting_opencode_stub "${fake_bin}"
+
+  run env \
+    PATH="${fake_bin}:${PATH}" \
+    HOME="${fake_home}" \
+    ACTION_PATH="${fake_action}" \
+    GITHUB_WORKSPACE="${fake_workspace}" \
+    PROMPT="explicit prompt" \
+    AGENT="build" \
+    MENTIONS="/oc" \
+    MODEL="demo/model" \
+    REVIEW_ONLY="false" \
+    USE_BUNDLED_TOOLKIT="false" \
+    TIMEOUT_MINUTES="5" \
+    MAX_ATTEMPTS="3" \
+    RETRY_DELAY_SECONDS="0" \
+    COUNT_FILE="${count_file}" \
+    FAIL_UNTIL="99" \
+    FAIL_STATUS="1" \
+    FAIL_MESSAGE="AI_APICallError: Insufficient credits (statusCode: 402)" \
+    "${run_script}"
+
+  [ "${status}" -ne 0 ]
+  [ "$(cat "${count_file}")" = "1" ]
+  [[ "${output}" == *"billing or quota"* ]]
 }

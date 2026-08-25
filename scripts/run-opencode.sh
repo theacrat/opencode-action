@@ -272,6 +272,28 @@ opencode_report_failure() {
   opencode_report_error "OpenCode failed with exit code ${status} for ${context}."
 }
 
+# Decide whether a failed 'opencode github run' is worth another attempt.
+# Retryable: transient provider/network failures (timeouts, 5xx, rate limits,
+# upstream/endpoint unavailability, dropped connections). Not retryable: the
+# action's enforced wall-clock timeout (status 124), which would just burn the
+# budget again, and billing/quota failures (HTTP 402 / insufficient credits),
+# which will not resolve on their own.
+opencode_failure_is_retryable() {
+  local status="${1}" output_file="${2}"
+
+  [[ "${status}" -eq 124 ]] && return 1
+
+  if grep -Eiq \
+    'Insufficient credits|HTTP[^[:digit:]]*402|status(Code)?[^[:digit:]]*402|"code"[^[:digit:]]*402' \
+    "${output_file}"; then
+    return 1
+  fi
+
+  grep -Eiq \
+    'Request timed out|SSE read timed out|TimeoutError|AI_APICallError|APIError|Upstream request failed|Endpoint is unavailable|server_error|Service Unavailable|Bad Gateway|Gateway Time-?out|overloaded|HTTP[^[:digit:]]*(429|500|502|503|504)|status(Code)?[^[:digit:]]*(429|500|502|503|504)|"code"[^[:digit:]]*(429|500|502|503|504)|ECONNRESET|ETIMEDOUT|EAI_AGAIN|socket hang up|fetch failed|Connection reset' \
+    "${output_file}"
+}
+
 opencode_configure_run() {
   local script_dir base_config
   local -a command_dirs
@@ -338,29 +360,53 @@ opencode_configure_run() {
 }
 
 _opencode_run_main() {
-  local output_file opencode_status timeout_minutes
+  local output_file opencode_status timeout_minutes max_attempts delay attempt
   timeout_minutes="${TIMEOUT_MINUTES:?TIMEOUT_MINUTES is required}"
+
+  max_attempts="${MAX_ATTEMPTS:-3}"
+  if ! [[ "${max_attempts}" =~ ^[0-9]+$ ]] || ((max_attempts < 1)); then
+    max_attempts=1
+  fi
+  delay="${RETRY_DELAY_SECONDS:-10}"
+  [[ "${delay}" =~ ^[0-9]+$ ]] || delay=10
 
   opencode_configure_run
   output_file="$(mktemp)"
   trap 'rm -f "${output_file}"' EXIT
   opencode_select_timeout_command "${timeout_minutes}"
 
-  set +e
-  "${OPENCODE_TIMEOUT_COMMAND[@]}" opencode github run 2>&1 | tee "${output_file}"
-  opencode_status="${PIPESTATUS[0]}"
-  set -e
+  attempt=1
+  while :; do
+    : > "${output_file}"
+    set +e
+    "${OPENCODE_TIMEOUT_COMMAND[@]}" opencode github run 2>&1 | tee "${output_file}"
+    opencode_status="${PIPESTATUS[0]}"
+    set -e
 
-  if [[ "${opencode_status}" -ne 0 ]]; then
+    if [[ "${opencode_status}" -eq 0 ]]; then
+      rm -f "${output_file}"
+      trap - EXIT
+      return 0
+    fi
+
+    if ((attempt < max_attempts)) \
+      && opencode_failure_is_retryable "${opencode_status}" "${output_file}"; then
+      _opencode_report_annotation warning \
+        "OpenCode attempt ${attempt} of ${max_attempts} failed with a transient error (exit ${opencode_status}) for model '${MODEL:-unknown}'. Retrying in ${delay}s."
+      sleep "${delay}"
+      attempt=$((attempt + 1))
+      delay=$((delay * 2))
+      if ((delay > 120)); then delay=120; fi
+      continue
+    fi
+
     opencode_report_failure \
       "${opencode_status}" "${output_file}" "${timeout_minutes}" \
       "${MODEL:-unknown}" "${OPENCODE_VERSION:-unknown}"
     rm -f "${output_file}"
     trap - EXIT
     return "${opencode_status}"
-  fi
-  rm -f "${output_file}"
-  trap - EXIT
+  done
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
