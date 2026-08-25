@@ -109,8 +109,10 @@ Outputs are `opencode-version` and `cache-hit`. `cache-hit` is empty on review-o
 
 ## Pull request reviews
 
-Set `prompt: /review-pr` to run the bundled read-only review through a dedicated permission-constrained primary agent. The command loads the internal `pr-review` skill, which builds a change/risk map, dispatches fresh read-only child sessions, independently validates candidate findings, and posts confirmed findings inline when they can be anchored to changed lines. Use `/review-pr` rather than loading `pr-review` directly when the enforced read-only boundary is required.
+Set `prompt: /review-pr` to run the bundled read-only review through a dedicated permission-constrained primary agent. The command loads the internal `pr-review` skill, which reviews the diff along two axes — Standards (repo conventions plus a Fowler smell baseline) and Spec (does the change match the originating issue/spec) — in parallel read-only `review-worker` sessions, validates the candidate findings, and submits one review. Use `/review-pr` rather than loading `pr-review` directly when the enforced read-only boundary is required.
 
-An unscoped review creates a small set of dynamic, risk-driven discovery tasks instead of routing to fixed specialist agents. Explicit aspects such as `security`, `tests`, `docs`, `performance`, or `simplify` constrain the selected review lenses. Discovery and validation run in separate fresh child sessions; the current OpenCode v1-compatible implementation uses one hidden `review-worker` definition for those sessions.
+Each axis runs in its own fresh `review-worker` session so they don't share context; the parent validates candidates against the diff before submitting. Confirmed findings are posted as inline comments in a `REQUEST_CHANGES` review; a clean diff is submitted as an `APPROVE`. If the review identity can't submit that verdict — a self-review on your own PR, or an org that has not enabled GitHub Actions approvals — the helper falls back to a plain comment review.
+
+To have the bot approve or request changes on PRs you authored, run the review with the default `github.token` (identity `github-actions[bot]`) and enable **Settings → Actions → General → Allow GitHub Actions to create and approve pull requests**. A personal access token belonging to the PR author cannot approve that author's own PR.
 
 See [Pull request reviews](docs/pull-request-reviews.md) for setup, supported review aspects, submission behavior, and security guarantees.

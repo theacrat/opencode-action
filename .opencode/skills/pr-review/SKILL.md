@@ -117,9 +117,9 @@ Validate each axis's candidate findings against the exact captured diff and repo
 
 Classify each remaining confirmed finding as inline when its file and head-side changed line can be anchored in the captured diff; adjust only to a nearby relevant changed line. When a finding's own reported line is not itself the changed line used for its anchor, strip any `suggestion` block from its message before submission because GitHub would apply the block to the moved anchor rather than the line the finding actually describes. Put genuine but unanchorable confirmed findings in `summary_only` with a short reason.
 
-Before returning any top-level text in PR mode, including no-finding and summary-only fallback results, invoke `bash "$HOME/.config/opencode/scripts/review-pr-gh.sh" validate`. If validation fails, stop. If there are no confirmed findings or material verification notes, return exactly `No noteworthy issues found.` Do not post an empty review.
+Before submitting, invoke `bash "$HOME/.config/opencode/scripts/review-pr-gh.sh" validate`. If validation fails, stop. The review is **always** submitted through the helper, whether or not there are findings: confirmed findings become inline comments and the helper submits a `REQUEST_CHANGES` review; a clean review is submitted with an empty `comments` array and the helper submits an `APPROVE`. Never post the outcome as an issue comment.
 
-For findings, the `prepare` and `context` operations in section 1 have already created the empty payload files and pinned the review context. Do not run them again. Use the edit tool only for `$HOME/.config/opencode/review-state/initial.json`, writing exactly `{body, comments}` with a nonempty body and inline comments array. Every single-line comment must have exactly `body`, `line`, `path`, and `side`; `line` is a positive integer and `side` is `LEFT` or `RIGHT`. A multiline comment additionally has exactly `start_line` and `start_side`; `start_line` is a positive integer no greater than `line`, and `start_side` equals `side`.
+The `prepare` and `context` operations in section 1 have already created the empty payload files and pinned the review context. Do not run them again. Use the edit tool only for `$HOME/.config/opencode/review-state/initial.json`, writing exactly `{body, comments}` with a nonempty body. `comments` is the array of inline findings. Submit an empty `comments` array **only** when there are no confirmed findings at all — that is the clean, approving case. If there are confirmed findings, `comments` must hold at least the anchorable ones; never submit a review that has findings with an empty `comments` array. Every single-line comment must have exactly `body`, `line`, `path`, and `side`; `line` is a positive integer and `side` is `LEFT` or `RIGHT`. A multiline comment additionally has exactly `start_line` and `start_side`; `start_line` is a positive integer no greater than `line`, and `start_side` equals `side`.
 
 ```json
 {
@@ -135,11 +135,11 @@ For findings, the `prepare` and `context` operations in section 1 have already c
 }
 ```
 
-The helper adds the trusted `commit_id` and `event` itself. Preserve each confirmed finding message's Markdown, including paragraph breaks and fenced code or `suggestion` blocks, except for a `suggestion` block stripped for a relocated anchor. Each inline body is `**<severity> · <dynamic-role>**`, followed by a blank line and the finding message.
+The helper adds the trusted `commit_id` and derives the review `event` itself: `REQUEST_CHANGES` when `comments` is non-empty, `APPROVE` when it is empty, falling back to a plain `COMMENT` review if GitHub rejects the verdict (a self-review on your own PR, or when GitHub Actions approvals are not enabled for the repo). Preserve each confirmed finding message's Markdown, including paragraph breaks and fenced code or `suggestion` blocks, except for a `suggestion` block stripped for a relocated anchor. Each inline body is `**<severity> · <dynamic-role>**`, followed by a blank line and the finding message.
 
 Every confirmed finding with a valid diff anchor must be included in the `comments` array and submitted as an inline review comment. Never return anchorable findings only as top-level assistant text. If structured submission fails, fail the run instead of emitting the findings as a top-level completion comment.
 
-When there are summary-only findings, the body begins `OpenCode PR Review: <N> inline finding(s), <M> summary-only finding(s).` and lists them. Otherwise it begins `OpenCode PR Review: <N> inline finding(s).` Never use issue comments or `gh pr comment`.
+For a clean review the body is a short approval note, e.g. `OpenCode PR Review: no blocking issues found.` When there are summary-only findings, the body begins `OpenCode PR Review: <N> inline finding(s), <M> summary-only finding(s).` and lists them. With inline findings only it begins `OpenCode PR Review: <N> inline finding(s).` Never use issue comments or `gh pr comment`.
 
 ## 6. Submit through the constrained helper
 
@@ -155,6 +155,8 @@ After the single `prepare` in section 1, write the initial payload only to `$HOM
 
 You never pass a repository, PR number, target commit, or review ID: the helper derives the repository and PR number from the trusted GitHub Actions context, pins the write to the head commit from the same context, and updates only the review ID it recorded when the initial submission succeeded in this run. It validates the trusted event context, Git identity and authentication, temporary payload, target commit, HTTP method, and exact pull-request-review endpoint.
 
-After successful inline submission, do not repeat findings in the final assistant output. Update the submitted review with final status and the run URL when available; the helper targets the review it recorded, so no review ID is passed. If GitHub rejects inline anchors, fail the run without retrying or posting a fallback. If no inline anchors remain before validation, return the concise markdown fallback instead of submitting an empty comments array.
+Update the submitted review with final status and the run URL when available; the helper targets the review it recorded, so no review ID is passed. If GitHub rejects inline anchors, fail the run without retrying or posting a fallback.
+
+After the review and its update are submitted, produce an **empty final response** — no summary, no restatement of findings, not even "done". The submitted review already carries the outcome; any trailing assistant text is published as a duplicate top-level comment.
 
 Do not clean, reset, restore, stash, commit, or push anything.

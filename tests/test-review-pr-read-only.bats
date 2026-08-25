@@ -188,14 +188,13 @@ EOF
   [[ "${output}" == *"body must be a nonempty string"* ]]
 }
 
-@test "validation rejects an empty comments array" {
+@test "validation accepts an empty comments array for an approving review" {
   prepare_state
-  printf '%s\n' '{"body":"Review","comments":[]}' > "${fake_home}/.config/opencode/review-state/initial.json"
+  printf '%s\n' '{"body":"OpenCode PR Review: no blocking issues found.","comments":[]}' > "${fake_home}/.config/opencode/review-state/initial.json"
 
   run env HOME="${fake_home}" bash "${submit}" validate-initial
 
-  [ "${status}" -ne 0 ]
-  [[ "${output}" == *"comments must be a nonempty array"* ]]
+  [ "${status}" -eq 0 ]
 }
 
 @test "validation rejects a comment that is not an object" {
@@ -406,4 +405,93 @@ EOF
   [[ "${allowed}" != *'*'* ]]
   run grep -E '(: allow.*(>|>>|[|]|<\())|((>|>>|[|]|<\().*: allow)' "${orchestrator}"
   [ "${status}" -eq 1 ]
+}
+
+# Stub gh that pins a head SHA, records the review event from each POST payload
+# into EVENT_CAPTURE, and returns a review id. When SELF_REVIEW_REJECT is set it
+# rejects non-COMMENT events with GitHub's self-review 422, accepting COMMENT.
+write_event_capturing_gh() {
+  cat > "${fake_bin}/gh" << 'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == "pr view 42 --repo octo/repo --json headRefOid --jq .headRefOid" ]]; then
+  printf '%s\n' 0123456789abcdef0123456789abcdef01234567
+  exit 0
+fi
+if [[ "$1" == "api" ]]; then
+  input=""
+  while [[ $# -gt 0 ]]; do
+    [[ "$1" == "--input" ]] && input="$2"
+    shift
+  done
+  event="$(jq -r '.event' "${input}")"
+  printf '%s\n' "${event}" >> "${EVENT_CAPTURE}"
+  if [[ -n "${SELF_REVIEW_REJECT:-}" && "${event}" != "COMMENT" ]]; then
+    printf 'gh: Unprocessable Entity - Can not approve your own pull request (HTTP 422)\n' >&2
+    exit 1
+  fi
+  jq -n '{id: 555}'
+  exit 0
+fi
+exit 1
+EOF
+  chmod +x "${fake_bin}/gh"
+}
+
+@test "submission requests changes when the review has findings" {
+  write_resolver
+  printf '%s\n' '{"issue":{"number":42}}' > "${event_path}"
+  event_capture="${BATS_TEST_TMPDIR}/events-rc"
+  write_event_capturing_gh
+  prepare_state
+  run env HOME="${fake_home}" PATH="${fake_bin}:${PATH}" GITHUB_REPOSITORY="octo/repo" GITHUB_EVENT_PATH="${event_path}" bash "${helper}" context
+  [ "${status}" -eq 0 ]
+  printf '%s\n' '{"body":"OpenCode PR Review: 1 inline finding(s).","comments":[{"path":"x","line":1,"side":"RIGHT","body":"**important · code-reviewer**\n\nfinding"}]}' > "${fake_home}/.config/opencode/review-state/initial.json"
+  run env HOME="${fake_home}" bash "${submit}" validate-initial
+  [ "${status}" -eq 0 ]
+
+  run env HOME="${fake_home}" PATH="${fake_bin}:${PATH}" EVENT_CAPTURE="${event_capture}" GITHUB_REPOSITORY="octo/repo" GITHUB_EVENT_PATH="${event_path}" bash "${submit}" submit-initial
+
+  [ "${status}" -eq 0 ]
+  [ "$(jq -r '.id' <<< "${output}")" = "555" ]
+  [ "$(cat "${event_capture}")" = "REQUEST_CHANGES" ]
+}
+
+@test "submission approves when the review has no findings" {
+  write_resolver
+  printf '%s\n' '{"issue":{"number":42}}' > "${event_path}"
+  event_capture="${BATS_TEST_TMPDIR}/events-approve"
+  write_event_capturing_gh
+  prepare_state
+  run env HOME="${fake_home}" PATH="${fake_bin}:${PATH}" GITHUB_REPOSITORY="octo/repo" GITHUB_EVENT_PATH="${event_path}" bash "${helper}" context
+  [ "${status}" -eq 0 ]
+  printf '%s\n' '{"body":"OpenCode PR Review: no blocking issues found.","comments":[]}' > "${fake_home}/.config/opencode/review-state/initial.json"
+  run env HOME="${fake_home}" bash "${submit}" validate-initial
+  [ "${status}" -eq 0 ]
+
+  run env HOME="${fake_home}" PATH="${fake_bin}:${PATH}" EVENT_CAPTURE="${event_capture}" GITHUB_REPOSITORY="octo/repo" GITHUB_EVENT_PATH="${event_path}" bash "${submit}" submit-initial
+
+  [ "${status}" -eq 0 ]
+  [ "$(jq -r '.id' <<< "${output}")" = "555" ]
+  [ "$(cat "${event_capture}")" = "APPROVE" ]
+}
+
+@test "submission falls back to a comment review when GitHub rejects a self-review" {
+  write_resolver
+  printf '%s\n' '{"issue":{"number":42}}' > "${event_path}"
+  event_capture="${BATS_TEST_TMPDIR}/events-fallback"
+  write_event_capturing_gh
+  prepare_state
+  run env HOME="${fake_home}" PATH="${fake_bin}:${PATH}" GITHUB_REPOSITORY="octo/repo" GITHUB_EVENT_PATH="${event_path}" bash "${helper}" context
+  [ "${status}" -eq 0 ]
+  printf '%s\n' '{"body":"OpenCode PR Review: no blocking issues found.","comments":[]}' > "${fake_home}/.config/opencode/review-state/initial.json"
+  run env HOME="${fake_home}" bash "${submit}" validate-initial
+  [ "${status}" -eq 0 ]
+
+  run env HOME="${fake_home}" PATH="${fake_bin}:${PATH}" EVENT_CAPTURE="${event_capture}" SELF_REVIEW_REJECT=1 GITHUB_REPOSITORY="octo/repo" GITHUB_EVENT_PATH="${event_path}" bash "${submit}" submit-initial
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"555"* ]]
+  [ "$(sed -n '1p' "${event_capture}")" = "APPROVE" ]
+  [ "$(sed -n '2p' "${event_capture}")" = "COMMENT" ]
+  [[ "${output}" == *"posting a comment review instead"* ]]
 }

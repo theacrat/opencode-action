@@ -36,8 +36,8 @@ validate_initial_payload() {
     || fail "Invalid initial review payload: top level must contain exactly body and comments."
   jq -e '.body | type == "string" and length > 0' "${initial_payload}" > /dev/null \
     || fail "Invalid initial review payload: body must be a nonempty string."
-  jq -e '.comments | type == "array" and length > 0' "${initial_payload}" > /dev/null \
-    || fail "Invalid initial review payload: comments must be a nonempty array."
+  jq -e '.comments | type == "array"' "${initial_payload}" > /dev/null \
+    || fail "Invalid initial review payload: comments must be an array."
 
   comment_count="$(jq '.comments | length' "${initial_payload}")"
   for ((index = 0; index < comment_count; index++)); do
@@ -86,6 +86,23 @@ validate_initial_payload() {
     ' "${initial_payload}" > /dev/null \
       || fail "Invalid initial review payload: comment ${index} contains unsupported or missing fields."
   done
+}
+
+# Post the pinned review with the given event, capturing stderr so a
+# self-review rejection can be detected. Uses globals current_payload,
+# head_sha, repo, pr_number, request; sets globals response and review_error.
+post_review_with_event() {
+  local event="${1}" status err_file
+  err_file="$(mktemp "${TMPDIR:-/tmp}/opencode-pr-review-err.XXXXXX")"
+  jq --arg commit_id "${head_sha}" --arg event "${event}" \
+    '. + {commit_id: $commit_id, event: $event}' <<< "${current_payload}" > "${request}"
+  set +e
+  response="$(gh api --method POST "repos/${repo}/pulls/${pr_number}/reviews" --input "${request}" 2> "${err_file}")"
+  status=$?
+  set -e
+  review_error="$(cat "${err_file}")"
+  rm -f "${err_file}"
+  return "${status}"
 }
 
 operation="${1:-}"
@@ -142,11 +159,30 @@ case "${operation}" in
     IFS=$'\t' read -r repo pr_number head_sha <<< "${context}"
     request="$(mktemp "${TMPDIR:-/tmp}/opencode-pr-review.XXXXXX.json")"
     trap 'rm -f "${request}"' EXIT
-    jq --arg commit_id "${head_sha}" '. + {commit_id: $commit_id, event: "COMMENT"}' <<< "${current_payload}" > "${request}"
+    # Findings request changes; a clean review approves. The event is derived
+    # from the sealed payload, not chosen by the model at submission time.
+    if [[ "$(jq '.comments | length' <<< "${current_payload}")" -gt 0 ]]; then
+      review_event="REQUEST_CHANGES"
+    else
+      review_event="APPROVE"
+    fi
     opencode_require_app_token_for_review "${USE_GITHUB_TOKEN:-false}" "${repo}" "${pr_number}"
     opencode_review_verify_head "${repo}" "${pr_number}" "${head_sha}" \
       || fail "Pinned PR context is unavailable or the PR head changed during token verification."
-    response="$(gh api --method POST "repos/${repo}/pulls/${pr_number}/reviews" --input "${request}")"
+    if ! post_review_with_event "${review_event}"; then
+      # GitHub blocks a verdict review (APPROVE/REQUEST_CHANGES) when the review
+      # identity is the PR author, or when the repo/org has not enabled
+      # "Allow GitHub Actions to create and approve pull requests". In either
+      # case, degrade to a plain comment review instead of failing the run.
+      if [[ "${review_event}" != "COMMENT" ]] \
+        && grep -qiE "your own pull request|not permitted to (approve|create)" <<< "${review_error}"; then
+        echo "::warning::Cannot submit a ${review_event} review (self-review, or GitHub Actions approval is not enabled); posting a comment review instead." >&2
+        post_review_with_event "COMMENT" \
+          || fail "Failed to submit the review after the verdict fallback: ${review_error}"
+      else
+        fail "Failed to submit the review: ${review_error}"
+      fi
+    fi
     review_id="$(jq -r '.id // empty' <<< "${response}")"
     [[ "${review_id}" =~ ^[1-9][0-9]*$ ]] || fail "Review ID was not returned."
     printf '%s' "${review_id}" > "${review_id_file}"

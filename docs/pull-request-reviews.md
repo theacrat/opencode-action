@@ -52,26 +52,25 @@ To select review aspects in this fixed-prompt setup, set `prompt` to `/review-pr
 | `/review-pr types`                | Type design                          |
 | `/review-pr simplify`             | Read-only simplification suggestions |
 
-An unscoped review first builds a change and risk map, covers baseline correctness, regression, tests, and documentation, then adds only lenses justified by the actual diff. It typically creates 2-6 dynamically named discovery tasks such as `authorization-boundary`, `migration-integrity`, `async-cleanup`, or `workflow-permissions`; these are task roles, not fixed agent identities. Explicit aspects are hard scope constraints rather than routes to specialist agent files.
+The review runs along two axes: **Standards** (the repo's documented conventions plus a fixed Fowler smell baseline) and **Spec** (does the diff match the originating issue/spec). Each axis is a fresh, read-only child session, and the two run in parallel so they don't share context. Explicit aspects are hard scope constraints, and the spec source is derived from the PR body, commit messages, or a spec path passed in the aspects.
 
-The current OpenCode v1-compatible runtime uses one hidden `review-worker` subagent definition with read/glob/grep permissions only. Each discovery task launches a fresh worker session, and every surviving candidate is checked in a separate fresh validation session that actively seeks counterevidence before the parent may publish it. When OpenCode v2's built-in read-only `explore` contract becomes the action runtime boundary, this compatibility worker can be removed without changing the review procedure.
+The current OpenCode v1-compatible runtime uses one hidden `review-worker` subagent definition with read/glob/grep permissions only. Each axis launches a fresh worker session, and the parent validates every surviving candidate against the captured diff — actively seeking counterevidence — before publishing it. When OpenCode v2's built-in read-only `explore` contract becomes the action runtime boundary, this compatibility worker can be removed without changing the review procedure.
 
 ## Finding and submission behavior
 
-The parent primary agent retains the full pull request context for anchoring and normalization while each child receives only a bounded packet for its specific risk hypothesis. The review flow then:
+The parent primary agent retains the full pull request context for anchoring and normalization while each child receives only a bounded packet for its axis. The review flow then:
 
-1. maps changed behavior and chooses only justified review lenses
-2. dispatches fresh read-only discovery tasks with bounded context
-3. deduplicates candidates by root cause
-4. validates candidates independently as `confirmed`, `rejected`, or `needs-human`
-5. arbitrates confirmed findings against the captured diff
-6. posts anchorable confirmed findings as inline review comments and keeps genuine unanchorable findings in the review body
+1. dispatches the Standards and Spec axes as fresh read-only sessions with bounded context
+2. deduplicates candidates by root cause
+3. validates candidates independently as `confirmed`, `rejected`, or `needs-human`
+4. arbitrates confirmed findings against the captured diff
+5. posts anchorable confirmed findings as inline review comments and keeps genuine unanchorable findings in the review body
 
 A successful run validates the complete payload without a GitHub write, then creates one structured GitHub review and updates its body with the workflow run link. The validated payload is sealed against later edits, and the live initial submission can be attempted only once per run. `/review-pr` does not post through `gh pr comment` or the issue comment API.
 
-If no finding can be anchored, the command returns a concise Markdown fallback instead of an empty review. Validation identifies missing or invalid fields before submission. Submission failures fail the workflow without a retry rather than risking an unintended review artifact or reposting findings as an unstructured comment.
+The helper derives the review verdict from the payload: confirmed findings (a non-empty `comments` array) submit as `REQUEST_CHANGES`; a clean review (empty `comments`) submits as `APPROVE`. If the review identity may not submit that verdict — a self-review on the author's own PR, or a repo/org that has not enabled GitHub Actions approvals — the helper degrades to a plain `COMMENT` review instead of failing. Approvals and change requests are attributed to the review token's identity: to let the bot act on PRs you authored, run with the default `github.token` (`github-actions[bot]`) and enable **Settings → Actions → General → Allow GitHub Actions to create and approve pull requests**; a personal access token belonging to the PR author cannot approve that author's own PR. Validation identifies missing or invalid fields before submission, and other submission failures fail the workflow without a retry.
 
-`opencode github run` may separately post the command's final completion message, so a run can produce the structured review plus at most one top-level completion comment.
+`opencode github run` posts the command's final assistant message as a top-level comment. To avoid a comment that merely restates the submitted review, the skill produces an empty final response after submitting, so a successful run leaves only the structured review.
 
 ## Security
 
