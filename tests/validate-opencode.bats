@@ -56,11 +56,6 @@ permission_allow_keys() {
   ' | sort
 }
 
-routing_line() {
-  local aspect="${1}"
-  grep -F -- "\`${aspect}\`" "${review_pr_skill}" | grep -E '^- ' | head -1
-}
-
 opencode_jsonc_json() {
   opencode_jsonc_to_json < "${opencode_jsonc}"
 }
@@ -103,7 +98,7 @@ opencode_jsonc_json() {
   [ -f "${review_worker}" ]
   [ "$(frontmatter_value "${review_worker}" mode)" = "subagent" ]
   [ "$(frontmatter_value "${review_worker}" hidden)" = "true" ]
-  grep -Fq 'TASK KIND: discovery | validation' "${review_worker}"
+  grep -Fq 'TASK KIND: standards | spec' "${review_worker}"
   grep -Fq 'fresh `review-worker` Task' "${review_pr_skill}"
 
   actual="$(permission_allow_keys "${orchestrator}" task)"
@@ -141,47 +136,26 @@ opencode_jsonc_json() {
   printf '%s\n' "${perm}" | grep -qE '^    "\*\.env\.example": allow$'
 }
 
-@test "explicit review aspects map to lenses instead of fixed agent identities" {
-  local aspect line keyword
+@test "pr-review runs two fixed axes via review-worker, not per-aspect lenses or fixed identities" {
+  # Two named axes, each dispatched as its own review-worker Task.
+  grep -Fq -- '- **Standards**' "${review_pr_skill}"
+  grep -Fq -- '- **Spec**' "${review_pr_skill}"
+  grep -Fq '**Standards Task**' "${review_pr_skill}"
+  grep -Fq '**Spec Task**' "${review_pr_skill}"
+  grep -Fq 'TASK KIND: standards' "${review_pr_skill}"
+  grep -Fq 'TASK KIND: spec' "${review_pr_skill}"
 
-  for aspect in code quality performance security tests coverage docs documentation comments errors types simplify all; do
-    line="$(routing_line "${aspect}")"
-    [ -n "${line}" ] || {
-      echo "missing lens mapping for ${aspect}"
-      return 1
-    }
-
-    case "${aspect}" in
-      code | quality) keyword="maintainability issues" ;;
-      performance) keyword="algorithmic complexity" ;;
-      security) keyword="fail-secure behavior" ;;
-      tests | coverage) keyword="test quality" ;;
-      docs | documentation) keyword="operational guidance" ;;
-      comments) keyword="implementation claims" ;;
-      errors) keyword="silent-failure risks" ;;
-      types) keyword="serialization contracts" ;;
-      simplify) keyword="KISS, DRY, and YAGNI" ;;
-      all) keyword="risk-driven lenses" ;;
-      *)
-        echo "no keyword mapping for aspect ${aspect}"
-        return 1
-        ;;
-    esac
-    [[ "${line}" == *"${keyword}"* ]] || {
-      echo "lens body for ${aspect} missing expected keyword '${keyword}': ${line}"
-      return 1
-    }
-  done
-
+  # The axes run through the generic worker, never provider-specific fixed reviewer identities.
   run grep -E 'code-reviewer|code-simplifier|documentation-accuracy-reviewer|finding-reviewer|performance-reviewer|security-code-reviewer|silent-failure-hunter|test-coverage-reviewer|type-design-analyzer' "${review_pr_skill}"
   [ "${status}" -eq 1 ]
 }
 
-@test "unscoped review uses baseline coverage and risk-driven dynamic roles" {
-  grep -Fq 'baseline correctness, regression, tests, and documentation checks' "${review_pr_skill}"
-  grep -Fq 'typically 2-6 discovery tasks' "${review_pr_skill}"
-  grep -Fq 'dynamic role name describing the actual risk under review' "${review_pr_skill}"
-  grep -Fq 'never reuse the discovery Task session for validation' "${review_pr_skill}"
+@test "standards axis carries the Fowler smell baseline and spec axis skips cleanly" {
+  grep -Fq 'smell baseline' "${review_pr_skill}"
+  grep -Fq 'The repo overrides.' "${review_pr_skill}"
+  grep -Fq 'Feature Envy' "${review_pr_skill}"
+  grep -Fq 'Primitive Obsession' "${review_pr_skill}"
+  grep -Fq 'no spec available' "${review_pr_skill}"
 }
 
 @test "orchestrator may load only pr-review and approved fixed bash commands" {
