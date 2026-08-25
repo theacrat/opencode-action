@@ -60,8 +60,8 @@ on:
       resume-on-crash:
         required: false
         type: boolean
-        description: EXPERIMENTAL. Continue a crashed opencode session in the same job (retry 3x with 30s/30s/60s backoff) instead of failing.
-        default: false
+        description: EXPERIMENTAL. Continue a crashed opencode session in the same job (retry 3x with 30s/30s/60s backoff) instead of failing. On by default; set false to use plain 'opencode github run'.
+        default: true
       runs-on:
         required: false
         type: string
