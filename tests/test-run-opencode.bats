@@ -919,3 +919,66 @@ _write_resume_opencode_stub() {
   run grep -q -- "--continue" "${oc_log}"
   [ "${status}" -ne 0 ]
 }
+
+@test "heartbeat tee forwards output and keeps heartbeats out of the capture file" {
+  capture="${BATS_TEST_TMPDIR}/heartbeat-capture"
+  : > "${capture}"
+
+  run bash -euo pipefail -c '
+    source "$1"
+    {
+      printf "line-one\n"
+      sleep 2
+      printf "line-two\n"
+    } | OPENCODE_PROGRESS_INTERVAL=1 _opencode_tee_with_heartbeat "$2"
+  ' _ "${run_script}" "${capture}"
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"line-one"* ]]
+  [[ "${output}" == *"line-two"* ]]
+  [[ "${output}" == *"[opencode] still running"* ]]
+  [[ "${output}" == *"no output for"* ]]
+  [ "$(cat "${capture}")" = "$(printf 'line-one\nline-two')" ]
+}
+
+@test "heartbeat tee stays quiet when output keeps arriving" {
+  capture="${BATS_TEST_TMPDIR}/heartbeat-busy-capture"
+  : > "${capture}"
+
+  run bash -euo pipefail -c '
+    source "$1"
+    {
+      for i in 1 2 3 4 5 6; do
+        printf "tick-%s\n" "$i"
+        /bin/sleep 0.3
+      done
+    } | OPENCODE_PROGRESS_INTERVAL=2 _opencode_tee_with_heartbeat "$2"
+  ' _ "${run_script}" "${capture}"
+
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"tick-1"* ]]
+  [[ "${output}" == *"tick-6"* ]]
+  [[ "${output}" != *"[opencode] still running"* ]]
+  [ "$(cat "${capture}")" = "$(printf 'tick-1\ntick-2\ntick-3\ntick-4\ntick-5\ntick-6')" ]
+}
+
+@test "resume-on-crash still captures output through the heartbeat tee" {
+  fake_bin="${BATS_TEST_TMPDIR}/resume-heartbeat"
+  _write_resume_opencode_stub "${fake_bin}"
+  oc_log="${BATS_TEST_TMPDIR}/log-heartbeat"
+  oc_count="${BATS_TEST_TMPDIR}/cnt-heartbeat"
+  oc_sleep="${BATS_TEST_TMPDIR}/slp-heartbeat"
+
+  run env \
+    PATH="${fake_bin}:${PATH}" HOME="${fake_home}" ACTION_PATH="${fake_action}" \
+    GITHUB_WORKSPACE="${fake_workspace}" PROMPT="explicit prompt" AGENT="build" \
+    MENTIONS="/oc" MODEL="demo/model" REVIEW_ONLY="false" USE_BUNDLED_TOOLKIT="false" \
+    TIMEOUT_MINUTES="5" RESUME_ON_CRASH="true" OPENCODE_PROGRESS_INTERVAL="60" \
+    OC_LOG="${oc_log}" OC_COUNT="${oc_count}" OC_SLEEP_LOG="${oc_sleep}" \
+    OC_RUN_STATUSES="1" OC_RUN_OUTPUT="AI_APICallError: rate limit exceeded (statusCode: 429)" \
+    "${run_script}"
+
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *"rate limited"* ]]
+  [[ "${output}" == *"AI_APICallError: rate limit exceeded"* ]]
+}

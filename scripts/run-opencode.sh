@@ -351,6 +351,58 @@ _opencode_resume_worth_retry() {
   return 0
 }
 
+# Forward OpenCode's stdout/stderr to the job log and a capture file. While the
+# stream is quiet (long model waits, subagent work), print a heartbeat so the
+# job does not look hung. Heartbeats go to the log only — never the capture
+# file — so failure classification and bot-reply JSON parsing stay clean.
+# OPENCODE_PROGRESS_INTERVAL (seconds, default 30) controls the quiet threshold.
+_opencode_tee_with_heartbeat() {
+  local output_file="${1}"
+  local interval="${OPENCODE_PROGRESS_INTERVAL:-30}"
+  local stamp hb_pid start now last quiet elapsed
+  local line sleep_bin
+
+  if ! [[ "${interval}" =~ ^[1-9][0-9]*$ ]]; then
+    interval=30
+  fi
+
+  # Prefer a real sleep binary so PATH stubs (used by resume backoff tests) cannot
+  # turn the heartbeat into a tight loop.
+  sleep_bin=/bin/sleep
+  [[ -x "${sleep_bin}" ]] || sleep_bin=/usr/bin/sleep
+
+  stamp="$(mktemp)"
+  date +%s > "${stamp}"
+  start="$(date +%s)"
+
+  (
+    while true; do
+      "${sleep_bin}" "${interval}" || exit 0
+      now="$(date +%s)"
+      last="$(cat "${stamp}" 2> /dev/null || printf '%s\n' "${start}")"
+      quiet=$((now - last))
+      elapsed=$((now - start))
+      if ((quiet >= interval)); then
+        printf '[opencode] still running (%dm%02ds elapsed, no output for %ds)\n' \
+          "$((elapsed / 60))" "$((elapsed % 60))" "${quiet}" >&2
+      fi
+    done
+  ) < /dev/null &
+  hb_pid=$!
+
+  while IFS= read -r line || [[ -n "${line}" ]]; do
+    printf '%s\n' "${line}"
+    printf '%s\n' "${line}" >> "${output_file}"
+    date +%s > "${stamp}"
+  done
+
+  # Stop the sleeper first; otherwise wait blocks until the interval ends.
+  pkill -P "${hb_pid}" 2> /dev/null || true
+  kill "${hb_pid}" 2> /dev/null || true
+  wait "${hb_pid}" 2> /dev/null || true
+  rm -f "${stamp}"
+}
+
 # The mention bot has no submission helper (reviews use review-pr-submit.sh),
 # so under 'opencode run' its reply must be captured from the JSON stream and
 # posted as a comment on the triggering issue/PR. Best-effort: a failed post
@@ -413,7 +465,8 @@ _opencode_run_resumable() {
   while :; do
     : > "${output_file}"
     set +e
-    "${OPENCODE_TIMEOUT_COMMAND[@]}" opencode "${run_args[@]}" 2>&1 | tee "${output_file}"
+    "${OPENCODE_TIMEOUT_COMMAND[@]}" opencode "${run_args[@]}" 2>&1 \
+      | _opencode_tee_with_heartbeat "${output_file}"
     opencode_status="${PIPESTATUS[0]}"
     set -e
 
@@ -457,8 +510,10 @@ _opencode_run_main() {
   trap 'rm -f "${output_file}"' EXIT
   opencode_select_timeout_command "${timeout_minutes}"
 
+  : > "${output_file}"
   set +e
-  "${OPENCODE_TIMEOUT_COMMAND[@]}" opencode github run 2>&1 | tee "${output_file}"
+  "${OPENCODE_TIMEOUT_COMMAND[@]}" opencode github run 2>&1 \
+    | _opencode_tee_with_heartbeat "${output_file}"
   opencode_status="${PIPESTATUS[0]}"
   set -e
 
