@@ -294,6 +294,8 @@ opencode_configure_run() {
   source "${script_dir}/opencode-action-lib.sh"
 
   if [[ "${USE_GITHUB_TOKEN:-false}" == "true" && -n "${GITHUB_TOKEN:-}" ]]; then
+    # Intentional: store a helper script literally; $1/GITHUB_TOKEN expand when git runs it.
+    # shellcheck disable=SC2016
     git config --global --add credential.https://github.com.helper \
       '!f() { test "$1" = get && printf "protocol=https\nhost=github.com\nusername=x-access-token\npassword=%s\n" "${GITHUB_TOKEN}"; }; f'
     git config --global user.name "opencode-agent[bot]"
@@ -349,15 +351,43 @@ _opencode_resume_worth_retry() {
   return 0
 }
 
-# EXPERIMENTAL (resume-on-crash): drive the review through 'opencode run' so a
+# The mention bot has no submission helper (reviews use review-pr-submit.sh),
+# so under 'opencode run' its reply must be captured from the JSON stream and
+# posted as a comment on the triggering issue/PR. Best-effort: a failed post
+# warns but does not fail the run.
+_opencode_post_bot_reply() {
+  local json_file="${1}" event_path="${GITHUB_EVENT_PATH:-}" repo="${GITHUB_REPOSITORY:-}" number body
+  [[ -f "${event_path}" && -n "${repo}" ]] || {
+    echo "::warning::No GitHub event context; skipping bot reply." >&2
+    return 0
+  }
+  number="$(jq -r '.issue.number // .pull_request.number // empty' "${event_path}" 2> /dev/null || true)"
+  [[ -n "${number}" ]] || {
+    echo "::warning::No issue or pull request number in the event; skipping bot reply." >&2
+    return 0
+  }
+  body="$(jq -rs 'map(select(.type == "text") | .part.text // empty) | join("")' "${json_file}" 2> /dev/null || true)"
+  if [[ -z "${body//[[:space:]]/}" ]]; then
+    echo "Bot produced no text reply to post." >&2
+    return 0
+  fi
+  if gh api "repos/${repo}/issues/${number}/comments" -f body="${body}" > /dev/null 2>&1; then
+    echo "Posted bot reply to ${repo}#${number}."
+  else
+    echo "::warning::Failed to post bot reply to ${repo}#${number}." >&2
+  fi
+}
+
+# EXPERIMENTAL (resume-on-crash): drive the run through 'opencode run' so a
 # crash can be continued in the SAME job -- 'opencode github run' has no resume
 # path. On a transient failure, continue the session (not restart it) up to
-# three times with a 30s/30s/60s backoff, then fail. Because it is same-job,
-# both the session and the helper review-state stay on the runner, so nothing
-# is trusted across runs and review isolation is preserved.
+# three times with a 30s/30s/60s backoff, then fail. Same-job keeps the session
+# and any helper state on the runner, so nothing is trusted across runs. Reviews
+# submit through their own helper and keep the readable log format; non-review
+# (bot) runs use the JSON stream so their reply can be captured and posted.
 _opencode_run_resumable() {
-  local output_file opencode_status timeout_minutes attempt delay
-  local -a run_args agent_args resume_delays=(30 30 60)
+  local output_file opencode_status timeout_minutes attempt delay message
+  local -a run_args agent_args fmt_args model_args variant_args resume_delays=(30 30 60)
   timeout_minutes="${TIMEOUT_MINUTES:?TIMEOUT_MINUTES is required}"
 
   opencode_configure_run
@@ -365,11 +395,20 @@ _opencode_run_resumable() {
   output_file="$(mktemp)"
   trap 'rm -f "${output_file}"' EXIT
 
+  # 'opencode github run' reads MODEL/VARIANT from the action env; 'opencode run'
+  # does not, so pass them explicitly or OpenCode falls back to a default model.
+  model_args=()
+  [[ -n "${MODEL:-}" ]] && model_args=(--model "${MODEL}")
+  variant_args=()
+  [[ -n "${VARIANT:-}" ]] && variant_args=(--variant "${VARIANT}")
   agent_args=()
   [[ -n "${OPENCODE_RESOLVED_AGENT:-}" ]] && agent_args=(--agent "${OPENCODE_RESOLVED_AGENT}")
+  message="${OPENCODE_RESOLVED_PROMPT:-${PROMPT:-}}"
+  fmt_args=()
+  [[ "${REVIEW_ONLY:-false}" == "true" ]] || fmt_args=(--format json)
 
   # Initial run creates the session; retries continue that same session.
-  run_args=(run "${agent_args[@]}" "${PROMPT:-}")
+  run_args=(run "${fmt_args[@]}" "${model_args[@]}" "${variant_args[@]}" "${agent_args[@]}" "${message}")
   attempt=0
   while :; do
     : > "${output_file}"
@@ -379,6 +418,7 @@ _opencode_run_resumable() {
     set -e
 
     if [[ "${opencode_status}" -eq 0 ]]; then
+      [[ "${REVIEW_ONLY:-false}" == "true" ]] || _opencode_post_bot_reply "${output_file}"
       rm -f "${output_file}"
       trap - EXIT
       return 0
@@ -398,7 +438,7 @@ _opencode_run_resumable() {
     attempt=$((attempt + 1))
     echo "::warning::OpenCode run failed (exit ${opencode_status}); continuing the session in ${delay}s (attempt ${attempt} of ${#resume_delays[@]})." >&2
     sleep "${delay}"
-    run_args=(run --continue "${agent_args[@]}" "Continue the review from where it stopped and finish it.")
+    run_args=(run --continue "${fmt_args[@]}" "${model_args[@]}" "${variant_args[@]}" "${agent_args[@]}" "Continue from where it stopped and finish the task.")
   done
 }
 

@@ -826,7 +826,7 @@ _write_resume_opencode_stub() {
     "${run_script}"
 
   [ "${status}" -eq 0 ]
-  grep -q "^run --agent build explicit prompt" "${oc_log}"
+  grep -q "^run --format json --model demo/model --agent build explicit prompt" "${oc_log}"
   run grep -q "github run" "${oc_log}"
   [ "${status}" -ne 0 ]
   run grep -q -- "--continue" "${oc_log}"
@@ -850,8 +850,8 @@ _write_resume_opencode_stub() {
     "${run_script}"
 
   [ "${status}" -ne 0 ]
-  [ "$(grep -c "^run --agent build explicit prompt" "${oc_log}")" -eq 1 ]
-  [ "$(grep -c "^run --continue" "${oc_log}")" -eq 3 ]
+  [ "$(grep -c "^run --format json --model demo/model --agent build explicit prompt" "${oc_log}")" -eq 1 ]
+  [ "$(grep -c "^run --continue --format json --model demo/model --agent build" "${oc_log}")" -eq 3 ]
   [ "$(cat "${oc_sleep}")" = "$(printf '30\n30\n60')" ]
 }
 
@@ -871,8 +871,30 @@ _write_resume_opencode_stub() {
     "${run_script}"
 
   [ "${status}" -eq 0 ]
-  [ "$(grep -c "^run --continue" "${oc_log}")" -eq 1 ]
+  [ "$(grep -c "^run --continue --format json --model demo/model --agent build" "${oc_log}")" -eq 1 ]
   [ "$(cat "${oc_sleep}")" = "30" ]
+}
+
+@test "resume-on-crash passes model and variant on review-only runs without json format" {
+  fake_bin="${BATS_TEST_TMPDIR}/resume-review-model"
+  _write_resume_opencode_stub "${fake_bin}"
+  oc_log="${BATS_TEST_TMPDIR}/log-review-model"
+  oc_count="${BATS_TEST_TMPDIR}/cnt-review-model"
+  oc_sleep="${BATS_TEST_TMPDIR}/slp-review-model"
+
+  run env \
+    PATH="${fake_bin}:${PATH}" HOME="${fake_home}" ACTION_PATH="${fake_action}" \
+    GITHUB_WORKSPACE="${fake_workspace}" PROMPT="review please" AGENT="build" \
+    MENTIONS="/oc" MODEL="opencode-go/ox-alpha-free" VARIANT="high" \
+    REVIEW_ONLY="true" USE_BUNDLED_TOOLKIT="false" \
+    TIMEOUT_MINUTES="5" RESUME_ON_CRASH="true" \
+    OC_LOG="${oc_log}" OC_COUNT="${oc_count}" OC_SLEEP_LOG="${oc_sleep}" OC_RUN_STATUSES="0" \
+    "${run_script}"
+
+  [ "${status}" -eq 0 ]
+  grep -q "^run --model opencode-go/ox-alpha-free --variant high --agent build review please" "${oc_log}"
+  run grep -q -- "--format json" "${oc_log}"
+  [ "${status}" -ne 0 ]
 }
 
 @test "resume-on-crash does not retry a billing failure" {
